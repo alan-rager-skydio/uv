@@ -22,7 +22,7 @@ use url::Url;
 
 use std::sync::{Arc, Mutex};
 
-use uv_client::resumable_reader::{ResumableConfig, ResponseExt};
+use uv_client::resumable_reader::{ResponseExt, ResumableConfig};
 use uv_client::{BaseClient, RetryState, WrappedReqwestError};
 use uv_distribution_filename::{ExtensionError, SourceDistExtension};
 use uv_extract::hash::Hasher;

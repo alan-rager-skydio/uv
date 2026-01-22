@@ -682,11 +682,9 @@ impl CachedClient {
         response_callback: Callback,
     ) -> Result<Payload, CachedClientError<CallBackError>> {
         let payload = self
-            .get_cacheable_with_retry(req, cache_entry, cache_control, |resp, retry_state| {
-                async {
-                    let payload = response_callback(resp, retry_state).await?;
-                    Ok(SerdeCacheable { inner: payload })
-                }
+            .get_cacheable_with_retry(req, cache_entry, cache_control, |resp, retry_state| async {
+                let payload = response_callback(resp, retry_state).await?;
+                Ok(SerdeCacheable { inner: payload })
             })
             .await?;
         Ok(payload)
@@ -710,7 +708,10 @@ impl CachedClient {
         cache_control: CacheControl<'_>,
         response_callback: Callback,
     ) -> Result<Payload::Target, CachedClientError<CallBackError>> {
-        let retry_state = Arc::new(Mutex::new(RetryState::start(self.uncached().retry_policy(), req.url().clone())));
+        let retry_state = Arc::new(Mutex::new(RetryState::start(
+            self.uncached().retry_policy(),
+            req.url().clone(),
+        )));
         loop {
             let fresh_req = req.try_clone().expect("HTTP request must be cloneable");
             let retry_state_clone = retry_state.clone();
@@ -761,7 +762,10 @@ impl CachedClient {
         cache_control: CacheControl<'_>,
         response_callback: Callback,
     ) -> Result<Payload, CachedClientError<CallBackError>> {
-        let retry_state = Arc::new(Mutex::new(RetryState::start(self.uncached().retry_policy(), req.url().clone())));
+        let retry_state = Arc::new(Mutex::new(RetryState::start(
+            self.uncached().retry_policy(),
+            req.url().clone(),
+        )));
         loop {
             let fresh_req = req.try_clone().expect("HTTP request must be cloneable");
             let retry_state_clone = retry_state.clone();

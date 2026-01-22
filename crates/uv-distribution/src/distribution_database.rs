@@ -17,7 +17,7 @@ use uv_cache::{ArchiveId, CacheBucket, CacheEntry, WheelCache};
 use uv_cache_info::{CacheInfo, Timestamp};
 use uv_client::{
     CacheControl, CachedClientError, Connectivity, DataWithCachePolicy, RegistryClient, RetryState,
-    resumable_reader::{ResumableConfig, ResponseExt},
+    resumable_reader::{ResponseExt, ResumableConfig},
 };
 use uv_distribution_filename::WheelFilename;
 use uv_distribution_types::{
@@ -825,8 +825,7 @@ impl<'a, Context: BuildContext> DistributionDatabase<'a, Context> {
                         // Wrap the reader in a progress reporter. This will report 100% progress
                         // after the download is complete, even if we still have to unzip and hash
                         // part of the file.
-                        let mut reader =
-                            ProgressReader::new(reader, progress, &**reporter);
+                        let mut reader = ProgressReader::new(reader, progress, &**reporter);
 
                         tokio::io::copy(&mut reader, &mut writer)
                             .await
