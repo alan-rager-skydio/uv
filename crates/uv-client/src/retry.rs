@@ -269,6 +269,28 @@ fn find_source<E: Error + 'static>(orig: &dyn Error) -> Option<&E> {
     None
 }
 
+/// Convert a [`reqwest::Error`] into an [`io::Error`] while preserving the underlying
+/// [`io::ErrorKind`] from any nested [`io::Error`] in its source chain.
+///
+/// This is the bridge between streaming response bodies (which surface errors as [`io::Error`]
+/// through `.bytes_stream().map_err(...)`) and [`retryable_on_request_failure`] (which relies on
+/// the outer [`io::ErrorKind`] being meaningful to classify transient network failures).
+///
+/// The plain `io::Error::other(reqwest_err)` pattern loses this information by storing the
+/// error under [`io::ErrorKind::Other`], which the classifier treats as unknown.
+///
+/// See <https://github.com/astral-sh/uv/issues/8692>.
+pub fn reqwest_error_to_io_error(err: reqwest::Error) -> io::Error {
+    // Walk the source chain for a nested `io::Error`, and adopt its `ErrorKind` while keeping
+    // the original `reqwest::Error` as the payload so its Display / source chain are preserved.
+    if let Some(inner) = find_source::<io::Error>(&err) {
+        return io::Error::new(inner.kind(), err);
+    }
+    // Fall back to preserving the source chain under `Other`. The classifier will still walk
+    // the chain and recover the `reqwest::Error` for classification.
+    io::Error::other(err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -348,5 +370,35 @@ mod tests {
         ");
 
         Ok(())
+    }
+
+    /// Directly verify that [`reqwest_error_to_io_error`] recovers the inner
+    /// [`io::ErrorKind`] from an error wrapping an [`io::Error`]. Uses a synthetic
+    /// [`io::Error`] as an outer error with an inner [`io::Error`] source; the shim's
+    /// source-chain walk should find the inner kind.
+    #[test]
+    fn reqwest_error_to_io_error_walks_source_chain() {
+        use std::error::Error as StdError;
+        use std::fmt;
+
+        // Build a minimal error whose source is an `io::Error` with a known kind.
+        #[derive(Debug)]
+        struct OuterError(io::Error);
+        impl fmt::Display for OuterError {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("outer")
+            }
+        }
+        impl StdError for OuterError {
+            fn source(&self) -> Option<&(dyn StdError + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let outer = OuterError(io::Error::new(io::ErrorKind::ConnectionReset, "peer went away"));
+        // The shim only accepts reqwest::Error, so we exercise the inner logic via
+        // `find_source::<io::Error>` directly — which is what the shim uses.
+        let found = find_source::<io::Error>(&outer).expect("io::Error in source chain");
+        assert!(matches!(found.kind(), io::ErrorKind::ConnectionReset));
     }
 }

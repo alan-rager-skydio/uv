@@ -12,7 +12,10 @@ pub use registry_client::{
     Connectivity, MetadataFormat, RegistryClient, RegistryClientBuilder, SimpleDetailMetadata,
     SimpleDetailMetadatum, SimpleIndexMetadata, VersionFiles,
 };
-pub use retry::{RetriableError, RetryState, UvRetryableStrategy, retryable_on_request_failure};
+pub use retry::{
+    RetriableError, RetryState, UvRetryableStrategy, reqwest_error_to_io_error,
+    retryable_on_request_failure,
+};
 pub use rkyvutil::{Deserializer, OwnedArchive, Serializer, Validator};
 
 mod base_client;

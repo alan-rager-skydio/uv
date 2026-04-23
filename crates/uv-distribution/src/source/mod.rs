@@ -27,6 +27,7 @@ use uv_cache::{Cache, CacheBucket, CacheEntry, CacheShard, Removal, WheelCache};
 use uv_cache_info::CacheInfo;
 use uv_client::{
     CacheControl, CachedClientError, Connectivity, DataWithCachePolicy, RegistryClient,
+    reqwest_error_to_io_error,
 };
 use uv_configuration::{BuildKind, BuildOutput, NoSources};
 use uv_distribution_filename::{SourceDistExtension, WheelFilename};
@@ -2329,7 +2330,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
 
         let reader = response
             .bytes_stream()
-            .map_err(std::io::Error::other)
+            .map_err(reqwest_error_to_io_error)
             .into_async_read();
 
         // Create a hasher for each hash algorithm.
