@@ -792,7 +792,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
             Connectivity::Offline => CacheControl::AllowStale,
         };
 
-        let download = |response| {
+        let download = |response, _retry_state| {
             let query_url = url.clone();
 
             async {
@@ -2264,7 +2264,7 @@ impl<'a, T: BuildContext> SourceDistributionBuilder<'a, T> {
             Connectivity::Offline => CacheControl::AllowStale,
         };
 
-        let download = |response| {
+        let download = |response, _retry_state| {
             let query_url = url.clone();
 
             async {

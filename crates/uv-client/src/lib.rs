@@ -12,6 +12,7 @@ pub use registry_client::{
     Connectivity, MetadataFormat, RegistryClient, RegistryClientBuilder, SimpleDetailMetadata,
     SimpleDetailMetadatum, SimpleIndexMetadata, VersionFiles,
 };
+pub use resumable_reader::{ResponseExt, ResumableError, ResumableReader};
 pub use retry::{
     RetriableError, RetryState, UvRetryableStrategy, reqwest_error_to_io_error,
     retryable_on_request_failure,
@@ -28,6 +29,7 @@ mod linehaul;
 mod middleware;
 mod registry_client;
 mod remote_metadata;
+mod resumable_reader;
 mod retry;
 mod rkyvutil;
 mod tls;

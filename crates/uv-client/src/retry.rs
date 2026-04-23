@@ -128,6 +128,16 @@ impl RetryState {
         // waiting?
         tokio::time::sleep(duration).await;
     }
+
+    /// Wait before retrying the request, without borrowing the retry state.
+    ///
+    /// The ordinary [`Self::sleep_backoff`] holds `&self` across the await, which prevents
+    /// the caller from also holding a mutex guard on the [`RetryState`]. Callers that share
+    /// the retry state between layers (see `get_cacheable_with_retry`) should use this
+    /// helper after dropping the lock.
+    pub async fn sleep_backoff_static(duration: Duration) {
+        tokio::time::sleep(duration).await;
+    }
 }
 
 /// Whether the error looks like a network error that should be retried.

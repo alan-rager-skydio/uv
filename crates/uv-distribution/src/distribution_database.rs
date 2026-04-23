@@ -16,8 +16,9 @@ use uv_cache::{ArchiveId, CacheBucket, CacheEntry, WheelCache};
 use uv_cache_info::{CacheInfo, Timestamp};
 use uv_client::{
     CacheControl, CachedClientError, Connectivity, DataWithCachePolicy, RegistryClient,
-    reqwest_error_to_io_error,
+    ResponseExt, RetryState, reqwest_error_to_io_error,
 };
+use std::sync::Mutex as StdMutex;
 use uv_distribution_filename::{SourceDistExtension, WheelFilename};
 use uv_distribution_types::{
     BuildInfo, BuildableSource, BuiltDist, Dist, DistRef, File, HashPolicy, Hashed, IndexUrl,
@@ -92,24 +93,6 @@ impl<'a, Context: BuildContext> DistributionDatabase<'a, Context> {
         }
     }
 
-    /// Handle a specific `reqwest` error, and convert it to [`io::Error`].
-    ///
-    /// Replaces user-facing timeout errors with a hint about `UV_HTTP_TIMEOUT`, and otherwise
-    /// preserves the underlying [`io::ErrorKind`] via [`reqwest_error_to_io_error`] so that
-    /// [`uv_client::retryable_on_request_failure`] can classify transient stream errors.
-    fn handle_response_errors(&self, err: reqwest::Error) -> io::Error {
-        if err.is_timeout() {
-            // Assumption: The connect timeout with the 10s default is not the culprit.
-            return io::Error::new(
-                io::ErrorKind::TimedOut,
-                format!(
-                    "Failed to download distribution due to network timeout. Try increasing UV_HTTP_TIMEOUT (current value: {}s).",
-                    self.client.unmanaged.read_timeout().as_secs()
-                ),
-            );
-        }
-        reqwest_error_to_io_error(err)
-    }
 
     /// Either fetch the wheel or fetch and build the source distribution
     ///
@@ -668,8 +651,8 @@ impl<'a, Context: BuildContext> DistributionDatabase<'a, Context> {
 
         let query_url = &url.clone();
 
-        let download = |response: reqwest::Response| {
-            async {
+        let download = |response: reqwest::Response, retry_state: Arc<StdMutex<RetryState>>| {
+            async move {
                 let size = size.or_else(|| content_length(&response));
 
                 let progress = self
@@ -677,15 +660,32 @@ impl<'a, Context: BuildContext> DistributionDatabase<'a, Context> {
                     .as_ref()
                     .map(|reporter| (reporter, reporter.on_download_start(dist.name(), size)));
 
-                let reader = response
-                    .bytes_stream()
-                    .map_err(|err| self.handle_response_errors(err))
-                    .into_async_read();
+                // When the server supports Range requests, drive the response through the
+                // resumable reader so that transient mid-stream failures (HTTP/2 RST_STREAM
+                // from Envoy-style intermediaries, connection resets, etc.) trigger a
+                // seamless Range-based reconnect instead of aborting the extraction.
+                let reader: Pin<Box<dyn AsyncRead + Send>> = if response.supports_range_requests() {
+                    let base_client = self.client.unmanaged.cached_client().uncached().clone();
+                    match response.resumable_stream(base_client, retry_state) {
+                        Ok(resumable) => Box::pin(resumable),
+                        Err(resumable_err) => {
+                            return Err(Error::CacheRead(io::Error::other(format!(
+                                "failed to start resumable download: {resumable_err}"
+                            ))));
+                        }
+                    }
+                } else {
+                    let stream = response
+                        .bytes_stream()
+                        .map_err(reqwest_error_to_io_error)
+                        .into_async_read();
+                    Box::pin(stream.compat())
+                };
 
                 // Create a hasher for each hash algorithm.
                 let algorithms = hashes.algorithms();
                 let mut hashers = algorithms.into_iter().map(Hasher::from).collect::<Vec<_>>();
-                let mut hasher = uv_extract::hash::HashReader::new(reader.compat(), &mut hashers);
+                let mut hasher = uv_extract::hash::HashReader::new(reader, &mut hashers);
 
                 // Download and unzip the wheel to a temporary directory.
                 let temp_dir = tempfile::tempdir_in(self.build_context.cache().root())
@@ -845,8 +845,8 @@ impl<'a, Context: BuildContext> DistributionDatabase<'a, Context> {
 
         let query_url = &url.clone();
 
-        let download = |response: reqwest::Response| {
-            async {
+        let download = |response: reqwest::Response, retry_state: Arc<StdMutex<RetryState>>| {
+            async move {
                 let size = size.or_else(|| content_length(&response));
 
                 let progress = self
@@ -854,10 +854,26 @@ impl<'a, Context: BuildContext> DistributionDatabase<'a, Context> {
                     .as_ref()
                     .map(|reporter| (reporter, reporter.on_download_start(dist.name(), size)));
 
-                let reader = response
-                    .bytes_stream()
-                    .map_err(|err| self.handle_response_errors(err))
-                    .into_async_read();
+                // See `get_wheel` above: prefer the resumable reader when the server
+                // advertises Range support so that mid-stream failures recover via a
+                // single Range-based reconnect instead of re-downloading the full wheel.
+                let mut reader: Pin<Box<dyn AsyncRead + Send>> = if response.supports_range_requests() {
+                    let base_client = self.client.unmanaged.cached_client().uncached().clone();
+                    match response.resumable_stream(base_client, retry_state) {
+                        Ok(resumable) => Box::pin(resumable),
+                        Err(resumable_err) => {
+                            return Err(Error::CacheRead(io::Error::other(format!(
+                                "failed to start resumable download: {resumable_err}"
+                            ))));
+                        }
+                    }
+                } else {
+                    let stream = response
+                        .bytes_stream()
+                        .map_err(reqwest_error_to_io_error)
+                        .into_async_read();
+                    Box::pin(stream.compat())
+                };
 
                 // Download the wheel to a temporary file.
                 let temp_file = tempfile::tempfile_in(self.build_context.cache().root())
@@ -872,15 +888,14 @@ impl<'a, Context: BuildContext> DistributionDatabase<'a, Context> {
                         // Wrap the reader in a progress reporter. This will report 100% progress
                         // after the download is complete, even if we still have to unzip and hash
                         // part of the file.
-                        let mut reader =
-                            ProgressReader::new(reader.compat(), progress, &**reporter);
+                        let mut reader = ProgressReader::new(reader, progress, &**reporter);
 
                         tokio::io::copy(&mut reader, &mut writer)
                             .await
                             .map_err(Error::CacheWrite)?;
                     }
                     None => {
-                        tokio::io::copy(&mut reader.compat(), &mut writer)
+                        tokio::io::copy(&mut reader, &mut writer)
                             .await
                             .map_err(Error::CacheWrite)?;
                     }

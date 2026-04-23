@@ -1,3 +1,4 @@
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{borrow::Cow, path::Path};
 
@@ -652,7 +653,7 @@ impl CachedClient {
     pub async fn get_serde_with_retry<
         Payload: Serialize + DeserializeOwned + Send + 'static,
         CallBackError: std::error::Error + 'static,
-        Callback: AsyncFn(Response) -> Result<Payload, CallBackError>,
+        Callback: AsyncFn(Response, Arc<Mutex<RetryState>>) -> Result<Payload, CallBackError>,
     >(
         &self,
         req: Request,
@@ -661,22 +662,31 @@ impl CachedClient {
         response_callback: Callback,
     ) -> Result<Payload, CachedClientError<CallBackError>> {
         let payload = self
-            .get_cacheable_with_retry(req, cache_entry, cache_control, async |resp| {
-                let payload = response_callback(resp).await?;
-                Ok(SerdeCacheable { inner: payload })
-            })
+            .get_cacheable_with_retry(
+                req,
+                cache_entry,
+                cache_control,
+                async |resp, retry_state| {
+                    let payload = response_callback(resp, retry_state).await?;
+                    Ok(SerdeCacheable { inner: payload })
+                },
+            )
             .await?;
         Ok(payload)
     }
 
     /// Perform a [`CachedClient::get_cacheable`] request with a default retry strategy.
     ///
+    /// The callback receives the response and a shared [`RetryState`] handle that nested
+    /// retry-aware readers (e.g. `ResumableReader`) can draw against so that a single budget
+    /// spans both the outer request loop and any per-chunk resumption attempts.
+    ///
     /// See: <https://github.com/TrueLayer/reqwest-middleware/blob/8a494c165734e24c62823714843e1c9347027e8a/reqwest-retry/src/middleware.rs#L137>
     #[instrument(skip_all)]
     pub async fn get_cacheable_with_retry<
         Payload: Cacheable,
         CallBackError: std::error::Error + 'static,
-        Callback: AsyncFn(Response) -> Result<Payload, CallBackError>,
+        Callback: AsyncFn(Response, Arc<Mutex<RetryState>>) -> Result<Payload, CallBackError>,
     >(
         &self,
         req: Request,
@@ -684,26 +694,39 @@ impl CachedClient {
         cache_control: CacheControl,
         response_callback: Callback,
     ) -> Result<Payload::Target, CachedClientError<CallBackError>> {
-        let mut retry_state = RetryState::start(self.uncached().retry_policy(), req.url().clone());
+        let retry_state = Arc::new(Mutex::new(RetryState::start(
+            self.uncached().retry_policy(),
+            req.url().clone(),
+        )));
         loop {
             let fresh_req = req.try_clone().expect("HTTP request must be cloneable");
+            let retry_state_for_callback = retry_state.clone();
             let result = self
-                .get_cacheable(
-                    fresh_req,
-                    cache_entry,
-                    cache_control.clone(),
-                    &response_callback,
-                )
+                .get_cacheable(fresh_req, cache_entry, cache_control.clone(), |resp| {
+                    response_callback(resp, retry_state_for_callback.clone())
+                })
                 .await;
 
             match result {
                 Ok(ok) => return Ok(ok),
                 Err(err) => {
-                    if let Some(backoff) = retry_state.should_retry(err.error(), err.retries()) {
-                        retry_state.sleep_backoff(backoff).await;
-                        continue;
+                    let backoff_or_done = {
+                        let mut state = retry_state
+                            .lock()
+                            .expect("RetryState mutex poisoned by a panicking task");
+                        match state.should_retry(err.error(), err.retries()) {
+                            Some(backoff) => Ok(backoff),
+                            None => Err(state.total_retries()),
+                        }
+                    };
+                    match backoff_or_done {
+                        Ok(backoff) => {
+                            RetryState::sleep_backoff_static(backoff).await;
+                        }
+                        Err(total_retries) => {
+                            return Err(err.with_retries(total_retries));
+                        }
                     }
-                    return Err(err.with_retries(retry_state.total_retries()));
                 }
             }
         }
@@ -711,11 +734,13 @@ impl CachedClient {
 
     /// Perform a [`CachedClient::skip_cache`] request with a default retry strategy.
     ///
+    /// See the note on [`CachedClient::get_cacheable_with_retry`] about the shared retry state.
+    ///
     /// See: <https://github.com/TrueLayer/reqwest-middleware/blob/8a494c165734e24c62823714843e1c9347027e8a/reqwest-retry/src/middleware.rs#L137>
     pub async fn skip_cache_with_retry<
         Payload: Serialize + DeserializeOwned + Send + 'static,
         CallBackError: std::error::Error + 'static,
-        Callback: AsyncFn(Response) -> Result<Payload, CallBackError>,
+        Callback: AsyncFn(Response, Arc<Mutex<RetryState>>) -> Result<Payload, CallBackError>,
     >(
         &self,
         req: Request,
@@ -723,26 +748,39 @@ impl CachedClient {
         cache_control: CacheControl,
         response_callback: Callback,
     ) -> Result<Payload, CachedClientError<CallBackError>> {
-        let mut retry_state = RetryState::start(self.uncached().retry_policy(), req.url().clone());
+        let retry_state = Arc::new(Mutex::new(RetryState::start(
+            self.uncached().retry_policy(),
+            req.url().clone(),
+        )));
         loop {
             let fresh_req = req.try_clone().expect("HTTP request must be cloneable");
+            let retry_state_for_callback = retry_state.clone();
             let result = self
-                .skip_cache(
-                    fresh_req,
-                    cache_entry,
-                    cache_control.clone(),
-                    &response_callback,
-                )
+                .skip_cache(fresh_req, cache_entry, cache_control.clone(), |resp| {
+                    response_callback(resp, retry_state_for_callback.clone())
+                })
                 .await;
 
             match result {
                 Ok(ok) => return Ok(ok),
                 Err(err) => {
-                    if let Some(backoff) = retry_state.should_retry(err.error(), err.retries()) {
-                        retry_state.sleep_backoff(backoff).await;
-                        continue;
+                    let backoff_or_done = {
+                        let mut state = retry_state
+                            .lock()
+                            .expect("RetryState mutex poisoned by a panicking task");
+                        match state.should_retry(err.error(), err.retries()) {
+                            Some(backoff) => Ok(backoff),
+                            None => Err(state.total_retries()),
+                        }
+                    };
+                    match backoff_or_done {
+                        Ok(backoff) => {
+                            RetryState::sleep_backoff_static(backoff).await;
+                        }
+                        Err(total_retries) => {
+                            return Err(err.with_retries(total_retries));
+                        }
                     }
-                    return Err(err.with_retries(retry_state.total_retries()));
                 }
             }
         }
