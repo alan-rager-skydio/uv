@@ -1243,19 +1243,23 @@ impl RegistryClient {
     }
 
     /// Handle a specific `reqwest` error, and convert it to [`io::Error`].
+    ///
+    /// Replaces user-facing timeout errors with a hint about `UV_HTTP_TIMEOUT`, and otherwise
+    /// preserves the underlying [`io::ErrorKind`] via
+    /// [`crate::retry::reqwest_error_to_io_error`] so that
+    /// [`crate::retryable_on_request_failure`] can classify transient stream errors.
     fn handle_response_errors(&self, err: reqwest::Error) -> std::io::Error {
         if err.is_timeout() {
             // Assumption: The connect timeout with the 10s default is not the culprit.
-            std::io::Error::new(
+            return std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
                     "Failed to download distribution due to network timeout. Try increasing UV_HTTP_TIMEOUT (current value: {}s).",
                     self.read_timeout().as_secs()
                 ),
-            )
-        } else {
-            std::io::Error::other(err)
+            );
         }
+        crate::retry::reqwest_error_to_io_error(err)
     }
 }
 

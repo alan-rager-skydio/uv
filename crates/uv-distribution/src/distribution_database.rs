@@ -16,6 +16,7 @@ use uv_cache::{ArchiveId, CacheBucket, CacheEntry, WheelCache};
 use uv_cache_info::{CacheInfo, Timestamp};
 use uv_client::{
     CacheControl, CachedClientError, Connectivity, DataWithCachePolicy, RegistryClient,
+    reqwest_error_to_io_error,
 };
 use uv_distribution_filename::{SourceDistExtension, WheelFilename};
 use uv_distribution_types::{
@@ -92,19 +93,22 @@ impl<'a, Context: BuildContext> DistributionDatabase<'a, Context> {
     }
 
     /// Handle a specific `reqwest` error, and convert it to [`io::Error`].
+    ///
+    /// Replaces user-facing timeout errors with a hint about `UV_HTTP_TIMEOUT`, and otherwise
+    /// preserves the underlying [`io::ErrorKind`] via [`reqwest_error_to_io_error`] so that
+    /// [`uv_client::retryable_on_request_failure`] can classify transient stream errors.
     fn handle_response_errors(&self, err: reqwest::Error) -> io::Error {
         if err.is_timeout() {
             // Assumption: The connect timeout with the 10s default is not the culprit.
-            io::Error::new(
+            return io::Error::new(
                 io::ErrorKind::TimedOut,
                 format!(
                     "Failed to download distribution due to network timeout. Try increasing UV_HTTP_TIMEOUT (current value: {}s).",
                     self.client.unmanaged.read_timeout().as_secs()
                 ),
-            )
-        } else {
-            io::Error::other(err)
+            );
         }
+        reqwest_error_to_io_error(err)
     }
 
     /// Either fetch the wheel or fetch and build the source distribution

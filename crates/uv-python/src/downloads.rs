@@ -23,7 +23,7 @@ use url::Url;
 
 use uv_client::{
     BaseClient, RetriableError, WrappedReqwestError, fetch_with_url_fallback,
-    retryable_on_request_failure,
+    reqwest_error_to_io_error, retryable_on_request_failure,
 };
 use uv_distribution_filename::{ExtensionError, SourceDistExtension};
 use uv_extract::hash::Hasher;
@@ -1829,7 +1829,7 @@ async fn read_url(
         let size = response.content_length();
         let stream = response
             .bytes_stream()
-            .map_err(io::Error::other)
+            .map_err(reqwest_error_to_io_error)
             .into_async_read();
 
         Ok((Either::Right(stream.compat()), size))
